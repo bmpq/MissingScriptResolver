@@ -26,11 +26,14 @@ public class MissingScriptResolver : EditorWindow
     private class ScriptCandidate
     {
         public MonoScript Script;
-        public int MatchCount;
+        public List<string> MatchedFields = new List<string>();
+        public List<string> UnmatchedFields = new List<string>();
+        public int MatchCount => MatchedFields.Count;
     }
 
     private List<BrokenReference> brokenReferences = new List<BrokenReference>();
     private Vector2 scrollPosition;
+    private Dictionary<string, bool> candidateFoldouts = new Dictionary<string, bool>();
 
     private static Dictionary<MonoScript, List<string>> scriptFieldCache;
     private static bool isCacheBuilt = false;
@@ -68,6 +71,7 @@ public class MissingScriptResolver : EditorWindow
     private void FindBrokenReferencesInSelection()
     {
         brokenReferences.Clear();
+        candidateFoldouts.Clear();
         var go = Selection.activeGameObject;
         if (go == null) return;
 
@@ -157,14 +161,28 @@ public class MissingScriptResolver : EditorWindow
                 var script = cacheEntry.Key;
                 var scriptFields = cacheEntry.Value;
 
-                int matchCount = reference.SerializedFieldNames.Count(fieldName => scriptFields.Contains(fieldName));
+                var matchedFields = new List<string>();
+                var unmatchedFields = new List<string>();
 
-                if (matchCount > 0)
+                foreach (var fieldName in reference.SerializedFieldNames)
+                {
+                    if (scriptFields.Contains(fieldName))
+                    {
+                        matchedFields.Add(fieldName);
+                    }
+                    else
+                    {
+                        unmatchedFields.Add(fieldName);
+                    }
+                }
+
+                if (matchedFields.Count > 0)
                 {
                     reference.Candidates.Add(new ScriptCandidate
                     {
                         Script = script,
-                        MatchCount = matchCount
+                        MatchedFields = matchedFields,
+                        UnmatchedFields = unmatchedFields
                     });
                 }
             }
@@ -226,18 +244,79 @@ public class MissingScriptResolver : EditorWindow
         }
         else
         {
-            int suggestionsToShow = Mathf.Min(reference.Candidates.Count, 3);
+            int suggestionsToShow = Mathf.Min(reference.Candidates.Count, 5);
             for (int i = 0; i < suggestionsToShow; i++)
             {
                 var candidate = reference.Candidates[i];
+                // Unique key for each foldout
+                string foldoutKey = $"{reference.ComponentFileID}_{candidate.Script.GetInstanceID()}";
+
+                if (!candidateFoldouts.ContainsKey(foldoutKey))
+                {
+                    candidateFoldouts[foldoutKey] = false;
+                }
+
+                EditorGUILayout.BeginVertical(EditorStyles.inspectorDefaultMargins);
+
                 EditorGUILayout.BeginHorizontal();
                 string label = $"{candidate.MatchCount}/{reference.SerializedFieldNames.Count} matched fields";
-                EditorGUILayout.ObjectField(label, candidate.Script, typeof(MonoScript), false);
+
+                candidateFoldouts[foldoutKey] = EditorGUILayout.Foldout(candidateFoldouts[foldoutKey], label, true);
+
+                EditorGUILayout.ObjectField(candidate.Script, typeof(MonoScript), false);
                 if (GUILayout.Button("Select", GUILayout.Width(60)))
                 {
                     reference.NewScript = candidate.Script;
                 }
                 EditorGUILayout.EndHorizontal();
+
+                if (candidateFoldouts[foldoutKey])
+                {
+                    EditorGUI.indentLevel++;
+
+                    EditorGUILayout.BeginHorizontal();
+
+                    GUIStyle styleParsedField = GUI.skin.GetStyle("ObjectFieldThumb");
+
+                    EditorGUILayout.BeginVertical();
+                    if (candidate.MatchedFields.Any())
+                    {
+                        EditorGUILayout.LabelField("Matched Fields:", EditorStyles.boldLabel);
+                        foreach (var fieldName in candidate.MatchedFields)
+                        {
+                            EditorGUILayout.LabelField(new GUIContent(
+                                $"{fieldName}",
+                                EditorGUIUtility.IconContent("Valid").image,
+                                "This field exists in both the serialized data and the candidate script."),
+                                styleParsedField);
+                        }
+                    }
+                    EditorGUILayout.EndVertical();
+
+                    EditorGUILayout.BeginVertical();
+
+                    if (candidate.UnmatchedFields.Any())
+                    {
+                        EditorGUILayout.LabelField("Unmatched Fields (in data):", EditorStyles.boldLabel);
+                        foreach (var fieldName in candidate.UnmatchedFields)
+                        {
+                            EditorGUILayout.LabelField(new GUIContent(
+                                $"{fieldName}",
+                                EditorGUIUtility.IconContent("Error").image,
+                                "This field exists in the serialized data but not in the candidate script. Its value will be lost if you fix with this script."),
+                                styleParsedField);
+                        }
+                    }
+
+                    EditorGUILayout.EndVertical();
+
+                    EditorGUILayout.EndHorizontal();
+
+                    EditorGUI.indentLevel--;
+                    EditorGUILayout.Space();
+                }
+
+                EditorGUILayout.EndVertical();
             }
         }
 

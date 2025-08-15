@@ -35,6 +35,9 @@ public class MissingScriptResolver : EditorWindow
     private static Dictionary<MonoScript, List<string>> scriptFieldCache;
     private static bool isCacheBuilt = false;
 
+    // deferred schedule after the GUI loop finishes
+    private BrokenReference _referenceToFix = null;
+
     [MenuItem("Tools/Missing Script Resolver")]
     public static void ShowWindow()
     {
@@ -192,6 +195,7 @@ public class MissingScriptResolver : EditorWindow
         else
         {
             EditorGUILayout.LabelField($"Found {brokenReferences.Count} broken reference(s):", EditorStyles.boldLabel);
+
             foreach (var reference in brokenReferences)
             {
                 DrawBrokenReferenceUI(reference);
@@ -199,7 +203,15 @@ public class MissingScriptResolver : EditorWindow
         }
 
         EditorGUILayout.EndScrollView();
+
+        if (_referenceToFix != null)
+        {
+            FixReferenceInFile(_referenceToFix);
+            _referenceToFix = null;
+            OnSelectionChanged();
+        }
     }
+
     private void DrawBrokenReferenceUI(BrokenReference reference)
     {
         EditorGUILayout.BeginVertical(EditorStyles.helpBox);
@@ -241,8 +253,7 @@ public class MissingScriptResolver : EditorWindow
                 $"This will find and replace ALL occurrences of the broken script GUID in the file:\n{Path.GetFileName(reference.FilePath)}\n\n" +
                 "Please ensure you have a backup or are using version control. Are you sure?", "Yes, Fix All", "Cancel"))
             {
-                FixReferenceInFile(reference);
-                OnSelectionChanged();
+                _referenceToFix = reference;
             }
         }
         GUI.enabled = true;

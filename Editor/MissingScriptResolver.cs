@@ -215,7 +215,7 @@ public class MissingScriptResolver : EditorWindow
                     }
                 }
 
-                if (matchedFields.Count > 0 || (reference.WasOdinSerialized && scriptInfo.IsOdinScript))
+                if (matchedFields.Count > 0)
                 {
                     reference.Candidates.Add(new ScriptCandidate
                     {
@@ -296,7 +296,7 @@ public class MissingScriptResolver : EditorWindow
         }
         else
         {
-            int suggestionsToShow = Mathf.Min(reference.Candidates.Count, 5);
+            int suggestionsToShow = Mathf.Min(reference.Candidates.Count, 20);
             for (int i = 0; i < suggestionsToShow; i++)
             {
                 var candidate = reference.Candidates[i];
@@ -466,18 +466,7 @@ public class MissingScriptResolver : EditorWindow
                     Type scriptType = script.GetClass();
                     if (scriptType != null && scriptType.IsSubclassOf(typeof(MonoBehaviour)))
                     {
-                        var fieldNames = new List<string>();
-                        var fields = scriptType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                        foreach (var field in fields)
-                        {
-                            if (field.IsPublic || field.GetCustomAttribute<SerializeField>() != null)
-                            {
-                                if (field.GetCustomAttribute<NonSerializedAttribute>() == null)
-                                {
-                                    fieldNames.Add(field.Name);
-                                }
-                            }
-                        }
+                        var fieldNames = GetAllSerializableFields(scriptType);
 
                         var cacheInfo = new ScriptCacheInfo
                         {
@@ -495,6 +484,29 @@ public class MissingScriptResolver : EditorWindow
             EditorUtility.ClearProgressBar();
         }
     }
+
+    private static List<string> GetAllSerializableFields(Type startingType)
+    {
+        var fieldNames = new HashSet<string>();
+        Type currentType = startingType;
+
+        // Walk up the inheritance chain until we hit MonoBehaviour or a non-Unity base class.
+        while (currentType != null && currentType != typeof(MonoBehaviour) && currentType.IsSubclassOf(typeof(Component)))
+        {
+            var fields = currentType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+            foreach (var field in fields)
+            {
+                if ((field.IsPublic || field.GetCustomAttribute<SerializeField>() != null) &&
+                    field.GetCustomAttribute<NonSerializedAttribute>() == null)
+                {
+                    fieldNames.Add(field.Name);
+                }
+            }
+            currentType = currentType.BaseType;
+        }
+        return fieldNames.ToList();
+    }
+
 
     private static ulong GetFileID(UnityEngine.Object target)
     {

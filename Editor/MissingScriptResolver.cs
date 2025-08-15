@@ -21,6 +21,7 @@ public class MissingScriptResolver : EditorWindow
         public List<string> SerializedFieldNames = new List<string>();
         public List<ScriptCandidate> Candidates = new List<ScriptCandidate>();
         public MonoScript NewScript;
+        public bool WasOdinSerialized;
     }
 
     private class ScriptCandidate
@@ -29,17 +30,42 @@ public class MissingScriptResolver : EditorWindow
         public List<string> MatchedFields = new List<string>();
         public List<string> UnmatchedFields = new List<string>();
         public int MatchCount => MatchedFields.Count;
+        public bool IsOdinScript;
+    }
+
+    private class ScriptCacheInfo
+    {
+        public List<string> FieldNames;
+        public bool IsOdinScript;
     }
 
     private List<BrokenReference> brokenReferences = new List<BrokenReference>();
     private Vector2 scrollPosition;
     private Dictionary<string, bool> candidateFoldouts = new Dictionary<string, bool>();
 
-    private static Dictionary<MonoScript, List<string>> scriptFieldCache;
+    private static Dictionary<MonoScript, ScriptCacheInfo> scriptFieldCache;
     private static bool isCacheBuilt = false;
 
-    // deferred schedule after the GUI loop finishes
     private BrokenReference _referenceToFix = null;
+
+    private static readonly HashSet<string> ignoredUnityFields = new HashSet<string>
+    {
+        "m_Name",
+        "m_EditorClassIdentifier"
+    };
+
+    private static readonly HashSet<string> odinSerializerFields = new HashSet<string>
+    {
+        "SerializedFormat",
+        "SerializedBytes",
+        "ReferencedUnityObjects",
+        "SerializedBytesString",
+        "Prefab",
+        "PrefabModificationsReferencedUnityObjects",
+        "PrefabModifications",
+        "SerializationNodes",
+        "serializationData"
+    };
 
     [MenuItem("Tools/Missing Script Resolver")]
     public static void ShowWindow()
@@ -51,6 +77,7 @@ public class MissingScriptResolver : EditorWindow
     {
         Selection.selectionChanged += OnSelectionChanged;
         OnSelectionChanged(); // Initial run
+        OnSelectionChanged();
     }
 
     private void OnDisable()
@@ -119,6 +146,7 @@ public class MissingScriptResolver : EditorWindow
                         FilePath = filePath,
                         ComponentFileID = componentFileID,
                         BrokenGuid = scriptGuid,
+                        WasOdinSerialized = false
                     };
 
                     // Extract serialized fields for analysis
@@ -133,7 +161,18 @@ public class MissingScriptResolver : EditorWindow
                             var match = fieldRegex.Match(line);
                             if (match.Success)
                             {
-                                reference.SerializedFieldNames.Add(match.Groups[1].Value);
+                                string fieldName = match.Groups[1].Value;
+                                if (ignoredUnityFields.Contains(fieldName))
+                                {
+                                    continue; // Skip Unity internal fields
+                                }
+                                if (odinSerializerFields.Contains(fieldName))
+                                {
+                                    reference.WasOdinSerialized = true;
+                                    continue; // Note that it was an Odin script, but don't add field to match list
+                                }
+
+                                reference.SerializedFieldNames.Add(fieldName);
                             }
                         }
                     }
@@ -154,19 +193,19 @@ public class MissingScriptResolver : EditorWindow
         foreach (var reference in brokenReferences)
         {
             reference.Candidates.Clear();
-            if (reference.SerializedFieldNames.Count == 0) continue;
+            if (reference.SerializedFieldNames.Count == 0 && !reference.WasOdinSerialized) continue;
 
             foreach (var cacheEntry in scriptFieldCache)
             {
                 var script = cacheEntry.Key;
-                var scriptFields = cacheEntry.Value;
+                var scriptInfo = cacheEntry.Value;
 
                 var matchedFields = new List<string>();
                 var unmatchedFields = new List<string>();
 
                 foreach (var fieldName in reference.SerializedFieldNames)
                 {
-                    if (scriptFields.Contains(fieldName))
+                    if (scriptInfo.FieldNames.Contains(fieldName))
                     {
                         matchedFields.Add(fieldName);
                     }
@@ -176,19 +215,27 @@ public class MissingScriptResolver : EditorWindow
                     }
                 }
 
-                if (matchedFields.Count > 0)
+                if (matchedFields.Count > 0 || (reference.WasOdinSerialized && scriptInfo.IsOdinScript))
                 {
                     reference.Candidates.Add(new ScriptCandidate
                     {
                         Script = script,
                         MatchedFields = matchedFields,
-                        UnmatchedFields = unmatchedFields
+                        UnmatchedFields = unmatchedFields,
+                        IsOdinScript = scriptInfo.IsOdinScript
                     });
                 }
             }
 
-            // Sort candidates by the number of matches, descending
-            reference.Candidates.Sort((a, b) => b.MatchCount.CompareTo(a.MatchCount));
+            reference.Candidates.Sort((a, b) =>
+            {
+                if (reference.WasOdinSerialized)
+                {
+                    int odinCompare = b.IsOdinScript.CompareTo(a.IsOdinScript);
+                    if (odinCompare != 0) return odinCompare;
+                }
+                return b.MatchCount.CompareTo(a.MatchCount);
+            });
         }
     }
 
@@ -237,6 +284,11 @@ public class MissingScriptResolver : EditorWindow
         EditorGUILayout.ObjectField("GameObject", reference.Owner, typeof(GameObject), true);
         EditorGUILayout.LabelField("Broken Script GUID:", reference.BrokenGuid);
 
+        if (reference.WasOdinSerialized)
+        {
+            EditorGUILayout.HelpBox("Odin Serializer fields detected. Original script was likely a 'SerializedMonoBehaviour'.", MessageType.Info);
+        }
+
         EditorGUILayout.LabelField("Suggested Scripts (based on serialized fields):", EditorStyles.boldLabel);
         if (reference.Candidates.Count == 0)
         {
@@ -259,7 +311,8 @@ public class MissingScriptResolver : EditorWindow
                 EditorGUILayout.BeginVertical(EditorStyles.inspectorDefaultMargins);
 
                 EditorGUILayout.BeginHorizontal();
-                string label = $"{candidate.MatchCount}/{reference.SerializedFieldNames.Count} matched fields";
+                string odinLabel = candidate.IsOdinScript ? " (Odin)" : "";
+                string label = $"{candidate.MatchCount}/{reference.SerializedFieldNames.Count} matched fields{odinLabel}";
 
                 candidateFoldouts[foldoutKey] = EditorGUILayout.Foldout(candidateFoldouts[foldoutKey], label, true);
 
@@ -387,10 +440,14 @@ public class MissingScriptResolver : EditorWindow
 
     private static void BuildScriptCache()
     {
+        Type odinType = AppDomain.CurrentDomain.GetAssemblies()
+                                 .SelectMany(assembly => assembly.GetTypes())
+                                 .FirstOrDefault(t => t.FullName == "Sirenix.OdinInspector.SerializedMonoBehaviour");
+
         try
         {
             EditorUtility.DisplayProgressBar("Building Script Cache", "Finding all scripts...", 0.1f);
-            scriptFieldCache = new Dictionary<MonoScript, List<string>>();
+            scriptFieldCache = new Dictionary<MonoScript, ScriptCacheInfo>();
             string[] scriptGuids = AssetDatabase.FindAssets("t:MonoScript");
 
             for (int i = 0; i < scriptGuids.Length; i++)
@@ -421,7 +478,13 @@ public class MissingScriptResolver : EditorWindow
                                 }
                             }
                         }
-                        scriptFieldCache[script] = fieldNames;
+
+                        var cacheInfo = new ScriptCacheInfo
+                        {
+                            FieldNames = fieldNames,
+                            IsOdinScript = odinType != null && scriptType.IsSubclassOf(odinType)
+                        };
+                        scriptFieldCache[script] = cacheInfo;
                     }
                 }
             }
@@ -431,7 +494,6 @@ public class MissingScriptResolver : EditorWindow
         {
             EditorUtility.ClearProgressBar();
         }
-        Debug.Log($"Script field cache built with {scriptFieldCache.Count} MonoBehaviour entries.");
     }
 
     private static ulong GetFileID(UnityEngine.Object target)

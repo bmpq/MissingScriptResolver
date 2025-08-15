@@ -5,6 +5,9 @@ using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System;
 
 public class MissingScriptResolver : EditorWindow
 {
@@ -15,11 +18,22 @@ public class MissingScriptResolver : EditorWindow
         public ulong ComponentFileID;
         public string BrokenGuid;
         public string SerializedDataPreview;
+        public List<string> SerializedFieldNames = new List<string>();
+        public List<ScriptCandidate> Candidates = new List<ScriptCandidate>();
         public MonoScript NewScript;
+    }
+
+    private class ScriptCandidate
+    {
+        public MonoScript Script;
+        public int MatchCount;
     }
 
     private List<BrokenReference> brokenReferences = new List<BrokenReference>();
     private Vector2 scrollPosition;
+
+    private static Dictionary<MonoScript, List<string>> scriptFieldCache;
+    private static bool isCacheBuilt = false;
 
     [MenuItem("Tools/Missing Script Resolver")]
     public static void ShowWindow()
@@ -30,7 +44,7 @@ public class MissingScriptResolver : EditorWindow
     private void OnEnable()
     {
         Selection.selectionChanged += OnSelectionChanged;
-        OnSelectionChanged();
+        OnSelectionChanged(); // Initial run
     }
 
     private void OnDisable()
@@ -41,63 +55,11 @@ public class MissingScriptResolver : EditorWindow
     private void OnSelectionChanged()
     {
         FindBrokenReferencesInSelection();
+        if (brokenReferences.Count > 0)
+        {
+            FindAndRankCandidatesForAll();
+        }
         Repaint();
-    }
-
-    private void OnGUI()
-    {
-        scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);
-
-        if (brokenReferences.Count == 0)
-        {
-            EditorGUILayout.LabelField("No broken script references found on the selected object.");
-        }
-        else
-        {
-            EditorGUILayout.LabelField($"Found {brokenReferences.Count} broken reference(s):", EditorStyles.boldLabel);
-            foreach (var reference in brokenReferences)
-            {
-                DrawBrokenReferenceUI(reference);
-            }
-        }
-
-        EditorGUILayout.EndScrollView();
-    }
-
-    private void DrawBrokenReferenceUI(BrokenReference reference)
-    {
-        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-
-        EditorGUILayout.ObjectField("GameObject", reference.Owner, typeof(GameObject), true);
-        EditorGUILayout.LabelField("Broken Script GUID:", reference.BrokenGuid);
-
-        EditorGUILayout.LabelField("Serialized Data Preview:", EditorStyles.boldLabel);
-        EditorGUILayout.SelectableLabel(reference.SerializedDataPreview, EditorStyles.textArea, GUILayout.Height(100));
-
-        reference.NewScript = (MonoScript)EditorGUILayout.ObjectField("Assign Correct Script", reference.NewScript, typeof(MonoScript), false);
-
-        GUI.enabled = reference.NewScript != null;
-        if (GUILayout.Button("Fix This Reference"))
-        {
-            if (EditorUtility.DisplayDialog("Confirm File Modification",
-                $"This will directly modify the file:\n{Path.GetFileName(reference.FilePath)}\n\n" +
-                "Please ensure you have a backup or are using version control. Are you sure?", "Yes, Fix it", "Cancel"))
-            {
-                FixReferenceInFile(reference);
-                OnSelectionChanged();
-            }
-        }
-        GUI.enabled = true;
-
-        EditorGUILayout.EndVertical();
-        EditorGUILayout.Space();
-    }
-
-    private static ulong GetFileID(Object target)
-    {
-        if (target == null) return 0;
-        GlobalObjectId goid = GlobalObjectId.GetGlobalObjectIdSlow(target);
-        return goid.targetObjectId;
     }
 
     private void FindBrokenReferencesInSelection()
@@ -106,22 +68,8 @@ public class MissingScriptResolver : EditorWindow
         var go = Selection.activeGameObject;
         if (go == null) return;
 
-        string filePath = null;
-        var prefabStage = PrefabStageUtility.GetCurrentPrefabStage();
-        if (prefabStage != null && prefabStage.IsPartOfPrefabContents(go))
-        {
-            filePath = prefabStage.assetPath;
-        }
-        else if (!string.IsNullOrEmpty(go.scene.path))
-        {
-            filePath = go.scene.path;
-        }
-        else
-        {
-            return;
-        }
-
-        if (!File.Exists(filePath)) return;
+        string filePath = GetFilePathForGameObject(go);
+        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return;
 
         ulong targetGoFileID = GetFileID(go);
         if (targetGoFileID == 0) return;
@@ -129,6 +77,7 @@ public class MissingScriptResolver : EditorWindow
         string[] allLines = File.ReadAllLines(filePath);
         for (int i = 0; i < allLines.Length; i++)
         {
+            // Find a MonoBehaviour component block
             if (allLines[i].StartsWith("--- !u!114 &"))
             {
                 ulong componentFileID = ulong.Parse(Regex.Match(allLines[i], @"&(-?\d+)").Groups[1].Value);
@@ -137,6 +86,7 @@ public class MissingScriptResolver : EditorWindow
                 string scriptGuid = null;
                 int dataStartIndex = -1;
 
+                // Parse the component block
                 for (int j = i + 1; j < allLines.Length && !allLines[j].StartsWith("--- !"); j++)
                 {
                     if (allLines[j].Contains("m_GameObject:"))
@@ -152,31 +102,164 @@ public class MissingScriptResolver : EditorWindow
                     }
                 }
 
-                if (gameObjectFileID == targetGoFileID && !string.IsNullOrEmpty(scriptGuid))
+                // Check if this component belongs to our selected GameObject and its script is missing
+                if (gameObjectFileID == targetGoFileID && !string.IsNullOrEmpty(scriptGuid) &&
+                    string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(scriptGuid)))
                 {
-                    if (string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(scriptGuid)))
+                    var reference = new BrokenReference
                     {
-                        StringBuilder dataPreview = new StringBuilder();
-                        for (int k = dataStartIndex; k < allLines.Length && !allLines[k].StartsWith("--- !"); k++)
+                        Owner = go,
+                        FilePath = filePath,
+                        ComponentFileID = componentFileID,
+                        BrokenGuid = scriptGuid,
+                    };
+
+                    // Extract serialized fields for analysis
+                    StringBuilder dataPreview = new StringBuilder();
+                    Regex fieldRegex = new Regex(@"^\s+([a-zA-Z_]\w*):"); // Matches lines like "  _myField:"
+                    for (int k = dataStartIndex; k < allLines.Length && !allLines[k].StartsWith("--- !"); k++)
+                    {
+                        string line = allLines[k];
+                        if (!string.IsNullOrWhiteSpace(line) && line.StartsWith("  "))
                         {
-                            if (allLines[k].Trim().Length > 0 && allLines[k].StartsWith("  "))
+                            dataPreview.AppendLine(line.Trim());
+                            var match = fieldRegex.Match(line);
+                            if (match.Success)
                             {
-                                dataPreview.AppendLine(allLines[k].Trim());
+                                reference.SerializedFieldNames.Add(match.Groups[1].Value);
                             }
                         }
-
-                        brokenReferences.Add(new BrokenReference
-                        {
-                            Owner = go,
-                            FilePath = filePath,
-                            ComponentFileID = componentFileID,
-                            BrokenGuid = scriptGuid,
-                            SerializedDataPreview = dataPreview.ToString()
-                        });
                     }
+                    reference.SerializedDataPreview = dataPreview.ToString();
+                    brokenReferences.Add(reference);
                 }
             }
         }
+    }
+
+    private void FindAndRankCandidatesForAll()
+    {
+        if (!isCacheBuilt)
+        {
+            BuildScriptCache();
+        }
+
+        foreach (var reference in brokenReferences)
+        {
+            reference.Candidates.Clear();
+            if (reference.SerializedFieldNames.Count == 0) continue;
+
+            foreach (var cacheEntry in scriptFieldCache)
+            {
+                var script = cacheEntry.Key;
+                var scriptFields = cacheEntry.Value;
+
+                int matchCount = reference.SerializedFieldNames.Count(fieldName => scriptFields.Contains(fieldName));
+
+                if (matchCount > 0)
+                {
+                    reference.Candidates.Add(new ScriptCandidate
+                    {
+                        Script = script,
+                        MatchCount = matchCount
+                    });
+                }
+            }
+
+            // Sort candidates by the number of matches, descending
+            reference.Candidates.Sort((a, b) => b.MatchCount.CompareTo(a.MatchCount));
+        }
+    }
+
+    private void OnGUI()
+    {
+        EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
+        GUILayout.FlexibleSpace();
+        if (GUILayout.Button("Rebuild Script Cache", EditorStyles.toolbarButton))
+        {
+            BuildScriptCache();
+            OnSelectionChanged();
+        }
+        EditorGUILayout.EndHorizontal();
+
+        scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);
+
+        if (brokenReferences.Count == 0)
+        {
+            EditorGUILayout.LabelField("No broken script references found on the selected object(s).");
+            EditorGUILayout.HelpBox("Select a GameObject in the Hierarchy that has a 'Missing Script' component.", MessageType.Info);
+        }
+        else
+        {
+            EditorGUILayout.LabelField($"Found {brokenReferences.Count} broken reference(s):", EditorStyles.boldLabel);
+            foreach (var reference in brokenReferences)
+            {
+                DrawBrokenReferenceUI(reference);
+            }
+        }
+
+        EditorGUILayout.EndScrollView();
+    }
+    private void DrawBrokenReferenceUI(BrokenReference reference)
+    {
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+
+        EditorGUILayout.ObjectField("GameObject", reference.Owner, typeof(GameObject), true);
+        EditorGUILayout.LabelField("Broken Script GUID:", reference.BrokenGuid);
+
+        EditorGUILayout.LabelField("Suggested Scripts (based on serialized fields):", EditorStyles.boldLabel);
+        if (reference.Candidates.Count == 0)
+        {
+            EditorGUILayout.LabelField("No potential script matches found.");
+        }
+        else
+        {
+            int suggestionsToShow = Mathf.Min(reference.Candidates.Count, 3);
+            for (int i = 0; i < suggestionsToShow; i++)
+            {
+                var candidate = reference.Candidates[i];
+                EditorGUILayout.BeginHorizontal();
+                string label = $"{candidate.MatchCount}/{reference.SerializedFieldNames.Count} matched fields";
+                EditorGUILayout.ObjectField(label, candidate.Script, typeof(MonoScript), false);
+                if (GUILayout.Button("Select", GUILayout.Width(60)))
+                {
+                    reference.NewScript = candidate.Script;
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+        }
+
+        EditorGUILayout.Space();
+
+        // Manual assignment field in the case if the suggestions are not satisfying
+        reference.NewScript = (MonoScript)EditorGUILayout.ObjectField("Assign Correct Script", reference.NewScript, typeof(MonoScript), false);
+
+        GUI.enabled = reference.NewScript != null;
+        if (GUILayout.Button("Fix This Reference"))
+        {
+            if (EditorUtility.DisplayDialog("Confirm File Modification",
+                $"This will find and replace ALL occurrences of the broken script GUID in the file:\n{Path.GetFileName(reference.FilePath)}\n\n" +
+                "Please ensure you have a backup or are using version control. Are you sure?", "Yes, Fix All", "Cancel"))
+            {
+                FixReferenceInFile(reference);
+                OnSelectionChanged();
+            }
+        }
+        GUI.enabled = true;
+
+        EditorGUILayout.Space();
+
+        var foldoutState = EditorPrefs.GetBool($"MissingScriptResolver_Foldout_{reference.ComponentFileID}", false);
+        foldoutState = EditorGUILayout.Foldout(foldoutState, "Serialized Data Preview");
+        if (foldoutState)
+        {
+            EditorGUILayout.SelectableLabel(reference.SerializedDataPreview, EditorStyles.textArea, GUILayout.Height(100), GUILayout.ExpandHeight(true));
+        }
+        EditorPrefs.SetBool($"MissingScriptResolver_Foldout_{reference.ComponentFileID}", foldoutState);
+
+
+        EditorGUILayout.EndVertical();
+        EditorGUILayout.Space();
     }
 
     private void FixReferenceInFile(BrokenReference reference)
@@ -189,39 +272,103 @@ public class MissingScriptResolver : EditorWindow
 
         string fileContent = File.ReadAllText(reference.FilePath);
 
+        // This pattern will find all occurrences of the m_Script line with the broken GUID.
+        // The fileID can be different for different references (e.g., 11500000 or -765806418), so we use a wildcard.
         string regexPattern = $@"m_Script: {{fileID: -?\d+, guid: {reference.BrokenGuid}, type: 3}}";
+
+        // This is the new line that will replace the broken ones.
         string replacementLine = $"m_Script: {{fileID: {newFileID}, guid: {newGuid}, type: 3}}";
 
-        string componentHeader = $"--- !u!114 &{(long)reference.ComponentFileID}";
-        int componentIndex = fileContent.IndexOf(componentHeader);
+        // Perform a global replacement across the entire file content.
+        string newFileContent = Regex.Replace(fileContent, regexPattern, replacementLine);
 
-        if (componentIndex == -1)
+        // Check if any changes were actually made.
+        if (fileContent.Equals(newFileContent))
         {
-            Debug.LogError($"Could not find component with fileID {(long)reference.ComponentFileID} in file {reference.FilePath}. Aborting.");
+            Debug.LogError($"Failed to find and replace any script lines with GUID {reference.BrokenGuid} in {Path.GetFileName(reference.FilePath)}. The script line might be malformed. Please check the file manually.", reference.Owner);
             return;
         }
 
-        int nextComponentIndex = fileContent.IndexOf("--- !", componentIndex + 1);
-        if (nextComponentIndex == -1)
-        {
-            nextComponentIndex = fileContent.Length;
-        }
-
-        string componentBlock = fileContent.Substring(componentIndex, nextComponentIndex - componentIndex);
-        string newComponentBlock = Regex.Replace(componentBlock, regexPattern, replacementLine, RegexOptions.Singleline);
-
-        if (componentBlock.Equals(newComponentBlock))
-        {
-            Debug.LogError($"Failed to find and replace the broken script line within the component block for {reference.Owner.name}. The script line might be malformed. Please check the file manually.", reference.Owner);
-            return;
-        }
-
-        fileContent = fileContent.Substring(0, componentIndex) + newComponentBlock + fileContent.Substring(nextComponentIndex);
-
-        File.WriteAllText(reference.FilePath, fileContent);
-
-        Debug.Log($"Successfully replaced script reference in {Path.GetFileName(reference.FilePath)} for component on {reference.Owner.name}", reference.Owner);
+        File.WriteAllText(reference.FilePath, newFileContent);
+        Debug.Log($"Successfully replaced all script references with GUID {reference.BrokenGuid} in {Path.GetFileName(reference.FilePath)}.", reference.Owner);
 
         AssetDatabase.Refresh();
+    }
+
+    private static void BuildScriptCache()
+    {
+        try
+        {
+            EditorUtility.DisplayProgressBar("Building Script Cache", "Finding all scripts...", 0.1f);
+            scriptFieldCache = new Dictionary<MonoScript, List<string>>();
+            string[] scriptGuids = AssetDatabase.FindAssets("t:MonoScript");
+
+            for (int i = 0; i < scriptGuids.Length; i++)
+            {
+                string guid = scriptGuids[i];
+                string path = AssetDatabase.GUIDToAssetPath(guid);
+                var script = AssetDatabase.LoadAssetAtPath<MonoScript>(path);
+
+                if (i % 20 == 0)
+                {
+                    EditorUtility.DisplayProgressBar("Building Script Cache", $"Processing: {Path.GetFileName(path)}", (float)i / scriptGuids.Length);
+                }
+
+                if (script != null)
+                {
+                    Type scriptType = script.GetClass();
+                    if (scriptType != null && scriptType.IsSubclassOf(typeof(MonoBehaviour)))
+                    {
+                        var fieldNames = new List<string>();
+                        var fields = scriptType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        foreach (var field in fields)
+                        {
+                            if (field.IsPublic || field.GetCustomAttribute<SerializeField>() != null)
+                            {
+                                if (field.GetCustomAttribute<NonSerializedAttribute>() == null)
+                                {
+                                    fieldNames.Add(field.Name);
+                                }
+                            }
+                        }
+                        scriptFieldCache[script] = fieldNames;
+                    }
+                }
+            }
+            isCacheBuilt = true;
+        }
+        finally
+        {
+            EditorUtility.ClearProgressBar();
+        }
+        Debug.Log($"Script field cache built with {scriptFieldCache.Count} MonoBehaviour entries.");
+    }
+
+    private static ulong GetFileID(UnityEngine.Object target)
+    {
+        if (target == null) return 0;
+        PropertyInfo inspectorModeInfo = typeof(SerializedObject).GetProperty("inspectorMode", BindingFlags.NonPublic | BindingFlags.Instance);
+        SerializedObject serializedObject = new SerializedObject(target);
+        inspectorModeInfo.SetValue(serializedObject, InspectorMode.Debug, null);
+        SerializedProperty localIdProp = serializedObject.FindProperty("m_LocalIdentfierInFile");
+        return (ulong)localIdProp.longValue;
+    }
+
+    private static string GetFilePathForGameObject(GameObject go)
+    {
+        // Check if it's a prefab instance being edited in the Prefab Stage
+        var prefabStage = PrefabStageUtility.GetCurrentPrefabStage();
+        if (prefabStage != null && prefabStage.IsPartOfPrefabContents(go))
+        {
+            return prefabStage.assetPath;
+        }
+
+        // Check if it's an object in a scene
+        if (!string.IsNullOrEmpty(go.scene.path))
+        {
+            return go.scene.path;
+        }
+
+        return null;
     }
 }

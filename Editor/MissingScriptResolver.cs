@@ -77,7 +77,6 @@ public class MissingScriptResolver : EditorWindow
     {
         Selection.selectionChanged += OnSelectionChanged;
         OnSelectionChanged(); // Initial run
-        OnSelectionChanged();
     }
 
     private void OnDisable()
@@ -118,6 +117,7 @@ public class MissingScriptResolver : EditorWindow
 
                 ulong gameObjectFileID = 0;
                 string scriptGuid = null;
+                long scriptFileID = 0;
                 int dataStartIndex = -1;
 
                 // Parse the component block
@@ -130,15 +130,19 @@ public class MissingScriptResolver : EditorWindow
                     }
                     else if (allLines[j].Contains("m_Script:"))
                     {
-                        var match = Regex.Match(allLines[j], @"guid: ([a-f0-9]{32})");
-                        if (match.Success) scriptGuid = match.Groups[1].Value;
+                        var scriptMatch = Regex.Match(allLines[j], @"fileID: (-?\d+), guid: ([a-f0-9]{32})");
+                        if (scriptMatch.Success)
+                        {
+                            scriptFileID = long.Parse(scriptMatch.Groups[1].Value);
+                            scriptGuid = scriptMatch.Groups[2].Value;
+                        }
                         dataStartIndex = j + 1;
                     }
                 }
 
                 // Check if this component belongs to our selected GameObject and its script is missing
                 if (gameObjectFileID == targetGoFileID && !string.IsNullOrEmpty(scriptGuid) &&
-                    string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(scriptGuid)))
+                    IsScriptReferenceBroken(scriptGuid, scriptFileID))
                 {
                     var reference = new BrokenReference
                     {
@@ -181,6 +185,33 @@ public class MissingScriptResolver : EditorWindow
                 }
             }
         }
+    }
+
+    private static bool IsScriptReferenceBroken(string guid, long fileID)
+    {
+        string path = AssetDatabase.GUIDToAssetPath(guid);
+        if (string.IsNullOrEmpty(path))
+        {
+            return true; // The script file itself is missing.
+        }
+
+        // The script file exists, but the specific class (identified by fileID) is missing from it
+        var assets = AssetDatabase.LoadAllAssetsAtPath(path);
+        foreach (var asset in assets)
+        {
+            if (asset is MonoScript)
+            {
+                if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(asset, out _, out long localFileID))
+                {
+                    if (localFileID == fileID)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
     }
 
     private void FindAndRankCandidatesForAll()

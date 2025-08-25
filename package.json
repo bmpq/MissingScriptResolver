@@ -1,0 +1,10 @@
+{
+	"name": "com.bmpq.missingscriptresolver",
+	"displayName": "Missing Script Resolver",
+	"version": "1.0.0",
+	"repository": {
+	    "type": "git",
+	    "url": "https://github.com/bmpq/MissingScriptResolver.git",
+	    "revision": "master"
+	}
+}

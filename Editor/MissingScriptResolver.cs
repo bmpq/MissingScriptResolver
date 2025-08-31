@@ -86,7 +86,7 @@ public class MissingScriptResolver : EditorWindow
 
     private void OnSelectionChanged()
     {
-        FindBrokenReferencesInSelection();
+        FindBrokenReferencesInSelectionAndChildren();
         if (brokenReferences.Count > 0)
         {
             FindAndRankCandidatesForAll();
@@ -94,20 +94,46 @@ public class MissingScriptResolver : EditorWindow
         Repaint();
     }
 
-    private void FindBrokenReferencesInSelection()
+    private void FindBrokenReferencesInSelectionAndChildren()
     {
         brokenReferences.Clear();
         candidateFoldouts.Clear();
-        var go = Selection.activeGameObject;
-        if (go == null) return;
 
-        string filePath = GetFilePathForGameObject(go);
-        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return;
+        var gameObjectsToScan = new HashSet<GameObject>();
+        foreach (var go in Selection.gameObjects)
+        {
+            if (go == null) continue;
+            foreach (var transform in go.GetComponentsInChildren<Transform>(true))
+            {
+                gameObjectsToScan.Add(transform.gameObject);
+            }
+        }
 
+        if (gameObjectsToScan.Count == 0) return;
+
+        // Group GameObjects by their file path to read each file only once
+        var groupedByFile = gameObjectsToScan
+            .Where(g => !string.IsNullOrEmpty(GetFilePathForGameObject(g)))
+            .GroupBy(g => GetFilePathForGameObject(g));
+
+        foreach (var group in groupedByFile)
+        {
+            string filePath = group.Key;
+            if (!File.Exists(filePath)) continue;
+
+            string[] allLines = File.ReadAllLines(filePath);
+            foreach (var go in group)
+            {
+                FindBrokenReferencesForGameObject(go, filePath, allLines);
+            }
+        }
+    }
+
+    private void FindBrokenReferencesForGameObject(GameObject go, string filePath, string[] allLines)
+    {
         ulong targetGoFileID = GetFileID(go);
         if (targetGoFileID == 0) return;
 
-        string[] allLines = File.ReadAllLines(filePath);
         for (int i = 0; i < allLines.Length; i++)
         {
             // Find a MonoBehaviour component block
@@ -140,7 +166,7 @@ public class MissingScriptResolver : EditorWindow
                     }
                 }
 
-                // Check if this component belongs to our selected GameObject and its script is missing
+                // Check if this component belongs to our target GameObject and its script is missing
                 if (gameObjectFileID == targetGoFileID && !string.IsNullOrEmpty(scriptGuid) &&
                     IsScriptReferenceBroken(scriptGuid, scriptFileID))
                 {
@@ -285,8 +311,8 @@ public class MissingScriptResolver : EditorWindow
 
         if (brokenReferences.Count == 0)
         {
-            EditorGUILayout.LabelField("No broken script references found on the selected object(s).");
-            EditorGUILayout.HelpBox("Select a GameObject in the Hierarchy that has a 'Missing Script' component.", MessageType.Info);
+            EditorGUILayout.LabelField("No broken script references found on the selected object(s) or their children.");
+            EditorGUILayout.HelpBox("Select one or more GameObjects in the Hierarchy. The tool will scan them and all their children for 'Missing Script' components.", MessageType.Info);
         }
         else
         {
@@ -413,8 +439,8 @@ public class MissingScriptResolver : EditorWindow
         if (GUILayout.Button("Fix This Reference"))
         {
             if (EditorUtility.DisplayDialog("Confirm File Modification",
-                $"This will find and replace ALL occurrences of the broken script GUID in the file:\n{Path.GetFileName(reference.FilePath)}\n\n" +
-                "Please ensure you have a backup or are using version control. Are you sure?", "Yes, Fix All", "Cancel"))
+                $"This will modify the file '{Path.GetFileName(reference.FilePath)}' to fix the component on GameObject '{reference.Owner.name}'.\n\n" +
+                "Please ensure you have a backup or are using version control. Are you sure?", "Yes, Fix It", "Cancel"))
             {
                 _referenceToFix = reference;
             }
@@ -598,9 +624,15 @@ public class MissingScriptResolver : EditorWindow
         }
 
         // Check if it's an object in a scene
-        if (!string.IsNullOrEmpty(go.scene.path))
+        if (go.scene.IsValid() && !string.IsNullOrEmpty(go.scene.path))
         {
             return go.scene.path;
+        }
+
+        // Check if it's a prefab asset on disk (not an instance in a scene)
+        if (PrefabUtility.IsPartOfPrefabAsset(go))
+        {
+            return AssetDatabase.GetAssetPath(go.transform.root.gameObject);
         }
 
         return null;

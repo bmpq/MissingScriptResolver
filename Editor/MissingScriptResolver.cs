@@ -444,29 +444,58 @@ public class MissingScriptResolver : EditorWindow
             return;
         }
 
-        string fileContent = File.ReadAllText(reference.FilePath);
+        string[] allLines = File.ReadAllLines(reference.FilePath);
+        bool foundAndFixed = false;
 
-        // This pattern will find all occurrences of the m_Script line with the broken GUID.
-        // The fileID can be different for different references (e.g., 11500000 or -765806418), so we use a wildcard.
-        string regexPattern = $@"m_Script: {{fileID: -?\d+, guid: {reference.BrokenGuid}, type: 3}}";
-
-        // This is the new line that will replace the broken ones.
-        string replacementLine = $"m_Script: {{fileID: {newFileID}, guid: {newGuid}, type: 3}}";
-
-        // Perform a global replacement across the entire file content.
-        string newFileContent = Regex.Replace(fileContent, regexPattern, replacementLine);
-
-        // Check if any changes were actually made.
-        if (fileContent.Equals(newFileContent))
+        // Find the start of the specific MonoBehaviour component block using its File ID
+        for (int i = 0; i < allLines.Length; i++)
         {
-            Debug.LogError($"Failed to find and replace any script lines with GUID {reference.BrokenGuid} in {Path.GetFileName(reference.FilePath)}. The script line might be malformed. Please check the file manually.", reference.Owner);
-            return;
+            // A component block starts with "--- !u!114 &<FileID>"
+            if (allLines[i].Contains($"--- !u!114 &{reference.ComponentFileID}"))
+            {
+                // Now search within this block for the m_Script line
+                for (int j = i + 1; j < allLines.Length; j++)
+                {
+                    // Stop if we've hit the next component block
+                    if (allLines[j].StartsWith("--- !"))
+                    {
+                        break;
+                    }
+
+                    // Find the line with the broken script reference
+                    if (allLines[j].Trim().StartsWith("m_Script:") && allLines[j].Contains(reference.BrokenGuid))
+                    {
+                        // Capture the indentation of the original line
+                        Match indentMatch = Regex.Match(allLines[j], @"^(\s*)");
+                        string indentation = indentMatch.Success ? indentMatch.Groups[1].Value : "  "; // Default to two spaces
+
+                        // Construct the new, corrected line with the original indentation
+                        string replacementLine = $"{indentation}m_Script: {{fileID: {newFileID}, guid: {newGuid}, type: 3}}";
+
+                        // Replace the line in our array
+                        allLines[j] = replacementLine;
+                        foundAndFixed = true;
+                        break; // Exit the inner loop once the script line is fixed
+                    }
+                }
+
+                if (foundAndFixed)
+                {
+                    break; // Exit the outer loop once we've found and fixed our target component
+                }
+            }
         }
 
-        File.WriteAllText(reference.FilePath, newFileContent);
-        Debug.Log($"Successfully replaced all script references with GUID {reference.BrokenGuid} in {Path.GetFileName(reference.FilePath)}.", reference.Owner);
-
-        AssetDatabase.Refresh();
+        if (foundAndFixed)
+        {
+            File.WriteAllLines(reference.FilePath, allLines);
+            Debug.Log($"Successfully fixed script reference on component {reference.ComponentFileID} in {Path.GetFileName(reference.FilePath)}.", reference.Owner);
+            AssetDatabase.Refresh();
+        }
+        else
+        {
+            Debug.LogError($"Failed to find the component with FileID {reference.ComponentFileID} and GUID {reference.BrokenGuid} in {Path.GetFileName(reference.FilePath)}. The file might have been modified externally. Please check the file manually.", reference.Owner);
+        }
     }
 
     private static void BuildScriptCache()
@@ -527,8 +556,8 @@ public class MissingScriptResolver : EditorWindow
             var fields = currentType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
             foreach (var field in fields)
             {
-                if ((field.IsPublic || field.GetCustomAttribute<SerializeField>() != null) &&
-                    field.GetCustomAttribute<NonSerializedAttribute>() == null)
+                if ((field.IsPublic || field.GetCustomAttributes<SerializeField>().Any()) &&
+                    !field.GetCustomAttributes<NonSerializedAttribute>().Any())
                 {
                     fieldNames.Add(field.Name);
                 }

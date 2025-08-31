@@ -506,9 +506,11 @@ public class MissingScriptResolver : EditorWindow
 
         try
         {
-            EditorUtility.DisplayProgressBar("Building Script Cache", "Finding all scripts...", 0.1f);
             scriptFieldCache = new Dictionary<MonoScript, ScriptCacheInfo>();
+
+            // --- STAGE 1: Process scripts from AssetDatabase (your .cs files) ---
             string[] scriptGuids = AssetDatabase.FindAssets("t:MonoScript");
+            EditorUtility.DisplayProgressBar("Building Script Cache", "Processing scripts in Assets...", 0f);
 
             for (int i = 0; i < scriptGuids.Length; i++)
             {
@@ -516,25 +518,33 @@ public class MissingScriptResolver : EditorWindow
                 string path = AssetDatabase.GUIDToAssetPath(guid);
                 var script = AssetDatabase.LoadAssetAtPath<MonoScript>(path);
 
-                if (i % 20 == 0)
+                if (i % 20 == 0) // Progress bar
                 {
-                    EditorUtility.DisplayProgressBar("Building Script Cache", $"Processing: {Path.GetFileName(path)}", (float)i / scriptGuids.Length);
+                    EditorUtility.DisplayProgressBar("Building Script Cache", $"Processing: {Path.GetFileName(path)}", (float)i / scriptGuids.Length * 0.5f);
                 }
 
                 if (script != null)
                 {
-                    Type scriptType = script.GetClass();
-                    if (scriptType != null && scriptType.IsSubclassOf(typeof(MonoBehaviour)))
-                    {
-                        var fieldNames = GetAllSerializableFields(scriptType);
+                    AddScriptToCache(script, odinType);
+                }
+            }
 
-                        var cacheInfo = new ScriptCacheInfo
-                        {
-                            FieldNames = fieldNames,
-                            IsOdinScript = odinType != null && scriptType.IsSubclassOf(odinType)
-                        };
-                        scriptFieldCache[script] = cacheInfo;
-                    }
+            // --- STAGE 2: Process scripts from all loaded assemblies (catches DLLs) ---
+            var allLoadedScripts = Resources.FindObjectsOfTypeAll<MonoScript>();
+            EditorUtility.DisplayProgressBar("Building Script Cache", "Processing scripts from loaded assemblies...", 0.5f);
+
+            for (int i = 0; i < allLoadedScripts.Length; i++)
+            {
+                var script = allLoadedScripts[i];
+
+                if (i % 50 == 0) // Progress bar
+                {
+                    EditorUtility.DisplayProgressBar("Building Script Cache", $"Processing: {script.name}", 0.5f + (float)i / allLoadedScripts.Length * 0.5f);
+                }
+
+                if (script != null && !scriptFieldCache.ContainsKey(script))
+                {
+                    AddScriptToCache(script, odinType);
                 }
             }
             isCacheBuilt = true;
@@ -594,5 +604,24 @@ public class MissingScriptResolver : EditorWindow
         }
 
         return null;
+    }
+
+    private static void AddScriptToCache(MonoScript script, Type odinType)
+    {
+        if (script == null) return;
+
+        // We only care about concrete MonoBehaviour classes that can actually be attached to a GameObject.
+        Type scriptType = script.GetClass();
+        if (scriptType != null && scriptType.IsSubclassOf(typeof(MonoBehaviour)) && !scriptType.IsAbstract)
+        {
+            var fieldNames = GetAllSerializableFields(scriptType);
+
+            var cacheInfo = new ScriptCacheInfo
+            {
+                FieldNames = fieldNames,
+                IsOdinScript = odinType != null && scriptType.IsSubclassOf(odinType)
+            };
+            scriptFieldCache[script] = cacheInfo;
+        }
     }
 }

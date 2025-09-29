@@ -339,7 +339,12 @@ public class MissingScriptResolver : EditorWindow
         EditorGUILayout.BeginVertical(EditorStyles.helpBox);
 
         EditorGUILayout.ObjectField("GameObject", reference.Owner, typeof(GameObject), true);
-        EditorGUILayout.LabelField("Broken Script GUID:", reference.BrokenGuid);
+        EditorGUILayout.BeginHorizontal();
+        {
+            EditorGUILayout.LabelField("Broken Script GUID:", GUILayout.Width(150));
+            EditorGUILayout.SelectableLabel(reference.BrokenGuid, GUILayout.Height(20));
+        }
+        EditorGUILayout.EndHorizontal();
 
         if (reference.WasOdinSerialized)
         {

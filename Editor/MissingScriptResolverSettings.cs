@@ -4,22 +4,28 @@ using UnityEngine;
 
 public class MissingScriptResolverSettings : ScriptableObject
 {
-    public int searchLimit = 10;
+    public int searchLimit = 3;
 
-    const string k_Path = "ProjectSettings/MissingScriptResolverSettings.asset";
+    private const string k_Path = "ProjectSettings/MissingScriptResolverSettings.asset";
 
-    public static MissingScriptResolverSettings GetOrCreateSettings()
+    internal static MissingScriptResolverSettings GetOrCreateSettings()
     {
-        var settings = InternalEditorUtility.LoadSerializedFileAndForget(k_Path);
-        if (settings.Length > 0 && settings[0] is MissingScriptResolverSettings loaded)
-            return loaded;
+        MissingScriptResolverSettings settings = null;
+        var settingsArray = InternalEditorUtility.LoadSerializedFileAndForget(k_Path);
+        if (settingsArray.Length > 0 && settingsArray[0] is MissingScriptResolverSettings loadedSettings)
+        {
+            settings = loadedSettings;
+        }
 
-        var instance = CreateInstance<MissingScriptResolverSettings>();
-        Save(instance);
-        return instance;
+        if (settings == null)
+        {
+            settings = CreateInstance<MissingScriptResolverSettings>();
+        }
+
+        return settings;
     }
 
-    public static void Save(MissingScriptResolverSettings settings)
+    internal static void Save(MissingScriptResolverSettings settings)
     {
         InternalEditorUtility.SaveToSerializedFileAndForget(new[] { settings }, k_Path, true);
     }
@@ -27,6 +33,8 @@ public class MissingScriptResolverSettings : ScriptableObject
 
 static class MissingScriptResolverSettingsProvider
 {
+    private static SerializedObject m_SerializedSettings;
+
     [SettingsProvider]
     public static SettingsProvider CreateMyToolProvider()
     {
@@ -36,9 +44,21 @@ static class MissingScriptResolverSettingsProvider
             guiHandler = (searchContext) =>
             {
                 var settings = MissingScriptResolverSettings.GetOrCreateSettings();
-                var so = new SerializedObject(settings);
-                EditorGUILayout.PropertyField(so.FindProperty("searchLimit"));
-                so.ApplyModifiedProperties();
+
+                if (m_SerializedSettings == null || m_SerializedSettings.targetObject != settings)
+                {
+                    m_SerializedSettings = new SerializedObject(settings);
+                }
+
+                EditorGUI.BeginChangeCheck();
+
+                EditorGUILayout.PropertyField(m_SerializedSettings.FindProperty("searchLimit"));
+
+                if (EditorGUI.EndChangeCheck())
+                {
+                    m_SerializedSettings.ApplyModifiedProperties();
+                    MissingScriptResolverSettings.Save(settings);
+                }
             },
             keywords = new System.Collections.Generic.HashSet<string>(new[] { "script", "reference", "missing" })
         };

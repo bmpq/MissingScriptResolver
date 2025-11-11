@@ -324,10 +324,9 @@ public class MissingScriptResolver : EditorWindow
     {
         EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
         GUILayout.FlexibleSpace();
-        if (GUILayout.Button("Rebuild Script Cache", EditorStyles.toolbarButton))
+        if (GUILayout.Button(new GUIContent($"", EditorGUIUtility.IconContent("Settings").image), EditorStyles.toolbarButton))
         {
-            BuildScriptCache();
-            OnSelectionChanged();
+            SettingsService.OpenProjectSettings("Project/MissingScriptResolver");
         }
         EditorGUILayout.EndHorizontal();
 

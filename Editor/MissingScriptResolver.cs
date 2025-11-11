@@ -91,10 +91,16 @@ public class MissingScriptResolver : EditorWindow
     void OnLostFocus() => isFocused = false;
     void OnBecameVisible() => isVisible = true;
     void OnBecameInvisible() => isVisible = false;
+
+    MissingScriptResolverSettings settings;
+
     private void OnSelectionChanged()
     {
         if (!isVisible)
             return;
+
+        settings = MissingScriptResolverSettings.GetOrCreateSettings();
+
         FindBrokenReferencesInSelectionAndChildren();
         if (brokenReferences.Count > 0)
         {
@@ -131,10 +137,19 @@ public class MissingScriptResolver : EditorWindow
             if (!File.Exists(filePath)) continue;
 
             string[] allLines = File.ReadAllLines(filePath);
+
+            int index = 0;
             foreach (var go in group)
             {
+                EditorUtility.DisplayProgressBar("Finding broken references", $"Found {brokenReferences.Count} broken references", (float)index / group.Count());
+                index++;
+
+                if (brokenReferences.Count > settings.searchLimit)
+                    break;
+
                 FindBrokenReferencesForGameObject(go, filePath, allLines);
             }
+            EditorUtility.ClearProgressBar();
         }
     }
 

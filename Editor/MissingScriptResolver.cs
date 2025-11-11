@@ -111,21 +111,25 @@ public class MissingScriptResolver : EditorWindow
             currentSelectedGameObject = go;
             break;
         }
-        if (currentSelectedGameObject == null) return;
 
         string newFile = GetFilePathForGameObject(currentSelectedGameObject);
         if (File.Exists(newFile) && currentFile != newFile)
         {
             currentFile = newFile;
-            settings = MissingScriptResolverSettings.GetOrCreateSettings();
-            FindBrokenReferencesInFile();
-
-            if (brokenReferences.Count > 0)
-            {
-                FindAndRankCandidatesForAll();
-            }
-            Repaint();
+            ScanCurrentFile();
         }
+    }
+
+    private void ScanCurrentFile()
+    {
+        settings = MissingScriptResolverSettings.GetOrCreateSettings();
+        FindBrokenReferencesInFile();
+
+        if (brokenReferences.Count > 0)
+        {
+            FindAndRankCandidatesForAll();
+        }
+        Repaint();
     }
 
     private void FindBrokenReferencesInFile()
@@ -134,7 +138,9 @@ public class MissingScriptResolver : EditorWindow
         candidateFoldouts.Clear();
         hitSearchLimit = false;
 
-        GameObject[] allGOsInFile = GetAllGameObjectsInFileByOneGameObject(currentSelectedGameObject);
+        List<GameObject> allGOsInFile = GetAllGameObjectsFromAsset(currentFile);
+        if (allGOsInFile.Count == 0)
+            return;
         Dictionary<ulong, GameObject> goMap = allGOsInFile.ToDictionary(GetFileID);
 
         string[] allLines = File.ReadAllLines(currentFile);
@@ -307,6 +313,14 @@ public class MissingScriptResolver : EditorWindow
     private void OnGUI()
     {
         EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
+        if (!string.IsNullOrEmpty(currentFile))
+        {
+            if (GUILayout.Button(new GUIContent($"Refresh", EditorGUIUtility.IconContent("Refresh").image), EditorStyles.toolbarButton))
+            {
+                ScanCurrentFile();
+            }
+            GUILayout.Label(currentFile, EditorStyles.toolbarTextField);
+        }
         GUILayout.FlexibleSpace();
         if (GUILayout.Button(new GUIContent($"", EditorGUIUtility.IconContent("Settings").image), EditorStyles.toolbarButton))
         {
@@ -316,9 +330,13 @@ public class MissingScriptResolver : EditorWindow
 
         scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);
 
-        if (brokenReferences.Count == 0)
+        if (string.IsNullOrEmpty(currentFile))
         {
-            EditorGUILayout.HelpBox("Select a GameObjects in the Hierarchy. The tool will scan the selected GameObject's asset file for 'Missing Script' components.", MessageType.Info);
+            EditorGUILayout.HelpBox("No file selected.", MessageType.Info);
+        }
+        else if (brokenReferences.Count == 0)
+        {
+            EditorGUILayout.HelpBox("No broken references found.", MessageType.Info);
         }
         else
         {
@@ -601,36 +619,75 @@ public class MissingScriptResolver : EditorWindow
         return (ulong)localIdProp.longValue;
     }
 
-    private static GameObject[] GetAllGameObjectsInFileByOneGameObject(GameObject go)
+    private static List<GameObject> GetAllGameObjectsFromAsset(string assetPath)
     {
-        if (go == null)
-            return null;
+        List<GameObject> gameObjects = new List<GameObject>();
 
-        // Check if it's a prefab instance being edited in the Prefab Stage
-        var prefabStage = PrefabStageUtility.GetCurrentPrefabStage();
-        if (prefabStage != null && prefabStage.IsPartOfPrefabContents(go))
+        if (string.IsNullOrEmpty(assetPath))
         {
-            Transform prefabRoot = prefabStage.prefabContentsRoot.transform;
-            return prefabRoot.GetComponentsInChildren<Transform>(true)
-                             .Select(t => t.gameObject)
-                             .ToArray();
+            Debug.LogError("Asset path is null or empty.");
+            return gameObjects;
         }
 
-        // Check if it's an object in a scene
-        if (go.scene.IsValid() && go.scene.isLoaded)
+        if (assetPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
         {
-            GameObject[] rootObjects = go.scene.GetRootGameObjects();
-            return rootObjects
-                .SelectMany(root => root.GetComponentsInChildren<Transform>(true))
-                .Select(t => t.gameObject)
-                .ToArray();
+            GameObject prefab = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
+            if (prefab != null)
+            {
+                gameObjects.Add(prefab);
+                GetChildGameObjects(prefab.transform, gameObjects);
+            }
+            else
+            {
+                Debug.LogWarning("Could not load prefab at path: " + assetPath);
+            }
+        }
+        else if (assetPath.EndsWith(".unity", StringComparison.OrdinalIgnoreCase))
+        {
+            UnityEngine.SceneManagement.Scene scene = EditorSceneManager.GetSceneByPath(assetPath);
+            bool sceneWasAlreadyOpen = scene.isLoaded;
+
+            if (!sceneWasAlreadyOpen)
+            {
+                scene = EditorSceneManager.OpenScene(assetPath, OpenSceneMode.Additive);
+            }
+
+            if (scene.IsValid())
+            {
+                GameObject[] rootGameObjects = scene.GetRootGameObjects();
+                foreach (GameObject root in rootGameObjects)
+                {
+                    gameObjects.Add(root);
+                    GetChildGameObjects(root.transform, gameObjects);
+                }
+            }
+            else
+            {
+                Debug.LogWarning("Could not open or find scene at path: " + assetPath);
+            }
+        }
+        else
+        {
+            Debug.LogWarning("Unsupported asset type at path: " + assetPath);
         }
 
-        return null;
+        return gameObjects;
+    }
+
+    private static void GetChildGameObjects(Transform parent, List<GameObject> gameObjects)
+    {
+        foreach (Transform child in parent)
+        {
+            gameObjects.Add(child.gameObject);
+            GetChildGameObjects(child, gameObjects);
+        }
     }
 
     private static string GetFilePathForGameObject(GameObject go)
     {
+        if (go == null)
+            return null;
+
         // Check if it's a prefab instance being edited in the Prefab Stage
         var prefabStage = PrefabStageUtility.GetCurrentPrefabStage();
         if (prefabStage != null && prefabStage.IsPartOfPrefabContents(go))

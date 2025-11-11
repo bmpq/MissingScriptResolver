@@ -354,7 +354,6 @@ public class MissingScriptResolver : EditorWindow
         {
             FixReferenceInFile(_referenceToFix);
             _referenceToFix = null;
-            OnSelectionChanged();
         }
     }
 
@@ -505,8 +504,7 @@ public class MissingScriptResolver : EditorWindow
         // Find the start of the specific MonoBehaviour component block using its File ID
         for (int i = 0; i < allLines.Length; i++)
         {
-            // A component block starts with "--- !u!114 &<FileID>"
-            if (allLines[i].Contains($"--- !u!114 &{reference.ComponentFileID}"))
+            if (allLines[i].StartsWith("--- !u!114 &"))
             {
                 // Now search within this block for the m_Script line
                 for (int j = i + 1; j < allLines.Length; j++)
@@ -532,11 +530,6 @@ public class MissingScriptResolver : EditorWindow
                         foundAndFixed = true;
                         break; // Exit the inner loop once the script line is fixed
                     }
-                }
-
-                if (foundAndFixed)
-                {
-                    break; // Exit the outer loop once we've found and fixed our target component
                 }
             }
         }

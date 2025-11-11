@@ -1,3 +1,5 @@
+<img width="1713" height="1284" alt="msr_screenshot" src="https://github.com/user-attachments/assets/51ee0495-f07a-45f7-9e6b-1a9e893a415d" />
+
 ## How it works
 Unity stores scene and prefab data in human-readable YAML. Even when a script is "missing," the data it serialized is often still present in the file. This tool leverages that fact.
 1. File Parsing: It reads the raw text of the `.unity` or `.prefab` file.

@@ -485,7 +485,7 @@ public class MissingScriptResolver : EditorWindow
         EditorGUILayout.Space();
 
         var foldoutState = EditorPrefs.GetBool($"MissingScriptResolver_Foldout_{reference.ComponentFileID}", false);
-        foldoutState = EditorGUILayout.Foldout(foldoutState, "Serialized Data Preview");
+        foldoutState = EditorGUILayout.Foldout(foldoutState, "Raw Serialized Data");
         if (foldoutState)
         {
             EditorGUILayout.SelectableLabel(reference.SerializedDataPreview, EditorStyles.textArea, GUILayout.Height(100), GUILayout.ExpandHeight(true));

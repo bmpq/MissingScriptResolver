@@ -503,7 +503,7 @@ public class MissingScriptResolver : EditorWindow
         }
 
         string[] allLines = File.ReadAllLines(reference.FilePath);
-        bool foundAndFixed = false;
+        int fixedAmount = 0;
 
         // Find the start of the specific MonoBehaviour component block using its File ID
         for (int i = 0; i < allLines.Length; i++)
@@ -528,20 +528,19 @@ public class MissingScriptResolver : EditorWindow
 
                         // Construct the new, corrected line with the original indentation
                         string replacementLine = $"{indentation}m_Script: {{fileID: {newFileID}, guid: {newGuid}, type: 3}}";
-
-                        // Replace the line in our array
                         allLines[j] = replacementLine;
-                        foundAndFixed = true;
-                        break; // Exit the inner loop once the script line is fixed
+
+                        fixedAmount++;
+                        break;
                     }
                 }
             }
         }
 
-        if (foundAndFixed)
+        if (fixedAmount > 0)
         {
             File.WriteAllLines(reference.FilePath, allLines);
-            Debug.Log($"Successfully fixed script reference on component {reference.ComponentFileID} in {Path.GetFileName(reference.FilePath)}.", reference.Owner);
+            Debug.Log($"Successfully fixed {fixedAmount} script references in {Path.GetFileName(reference.FilePath)}.");
             AssetDatabase.Refresh();
         }
         else
@@ -625,7 +624,6 @@ public class MissingScriptResolver : EditorWindow
 
         if (string.IsNullOrEmpty(assetPath))
         {
-            Debug.LogError("Asset path is null or empty.");
             return gameObjects;
         }
 

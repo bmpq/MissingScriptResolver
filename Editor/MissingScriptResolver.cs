@@ -39,12 +39,17 @@ public class MissingScriptResolver : EditorWindow
         public bool IsOdinScript;
     }
 
+    private GameObject currentSelectedGameObject;
+    private string currentFile;
+
     private List<BrokenReference> brokenReferences = new List<BrokenReference>();
     private Vector2 scrollPosition;
     private Dictionary<string, bool> candidateFoldouts = new Dictionary<string, bool>();
 
     private static Dictionary<MonoScript, ScriptCacheInfo> scriptFieldCache;
     private static bool isCacheBuilt = false;
+
+    private bool hitSearchLimit = false;
 
     private BrokenReference _referenceToFix = null;
 
@@ -98,66 +103,41 @@ public class MissingScriptResolver : EditorWindow
     {
         if (!isVisible)
             return;
-
-        settings = MissingScriptResolverSettings.GetOrCreateSettings();
-
-        FindBrokenReferencesInSelectionAndChildren();
-        if (brokenReferences.Count > 0)
-        {
-            FindAndRankCandidatesForAll();
-        }
-        Repaint();
-    }
-
-    private void FindBrokenReferencesInSelectionAndChildren()
-    {
-        brokenReferences.Clear();
-        candidateFoldouts.Clear();
-
-        var gameObjectsToScan = new HashSet<GameObject>();
+        
+        currentSelectedGameObject = null;
         foreach (var go in Selection.gameObjects)
         {
             if (go == null) continue;
-            foreach (var transform in go.GetComponentsInChildren<Transform>(true))
-            {
-                gameObjectsToScan.Add(transform.gameObject);
-            }
+            currentSelectedGameObject = go;
+            break;
         }
+        if (currentSelectedGameObject == null) return;
 
-        if (gameObjectsToScan.Count == 0) return;
-
-        // Group GameObjects by their file path to read each file only once
-        var groupedByFile = gameObjectsToScan
-            .Where(g => !string.IsNullOrEmpty(GetFilePathForGameObject(g)))
-            .GroupBy(g => GetFilePathForGameObject(g));
-
-        foreach (var group in groupedByFile)
+        string newFile = GetFilePathForGameObject(currentSelectedGameObject);
+        if (File.Exists(newFile) && currentFile != newFile)
         {
-            string filePath = group.Key;
-            if (!File.Exists(filePath)) continue;
+            currentFile = newFile;
+            settings = MissingScriptResolverSettings.GetOrCreateSettings();
+            FindBrokenReferencesInFile();
 
-            string[] allLines = File.ReadAllLines(filePath);
-
-            int index = 0;
-            foreach (var go in group)
+            if (brokenReferences.Count > 0)
             {
-                EditorUtility.DisplayProgressBar("Finding broken references", $"Found {brokenReferences.Count} broken references", (float)index / group.Count());
-                index++;
-
-                if (brokenReferences.Count > settings.searchLimit)
-                    break;
-
-                FindBrokenReferencesForGameObject(go, filePath, allLines);
+                FindAndRankCandidatesForAll();
             }
-            EditorUtility.ClearProgressBar();
+            Repaint();
         }
     }
 
-    private void FindBrokenReferencesForGameObject(GameObject go, string filePath, string[] allLines)
+    private void FindBrokenReferencesInFile()
     {
-        ulong targetGoFileID = GetFileID(go);
-        if (targetGoFileID == 0) return;
+        brokenReferences.Clear();
+        candidateFoldouts.Clear();
+        hitSearchLimit = false;
 
+        GameObject[] allGOsInFile = GetAllGameObjectsInFileByOneGameObject(currentSelectedGameObject);
+        Dictionary<ulong, GameObject> goMap = allGOsInFile.ToDictionary(GetFileID);
+
+        string[] allLines = File.ReadAllLines(currentFile);
         for (int i = 0; i < allLines.Length; i++)
         {
             // Find a MonoBehaviour component block
@@ -173,12 +153,12 @@ public class MissingScriptResolver : EditorWindow
                 // Parse the component block
                 for (int j = i + 1; j < allLines.Length && !allLines[j].StartsWith("--- !"); j++)
                 {
-                    if (allLines[j].Contains("m_GameObject:"))
+                    if (allLines[j].StartsWith("  m_GameObject:"))
                     {
                         var match = Regex.Match(allLines[j], @"fileID: (-?\d+)");
                         if (match.Success) gameObjectFileID = ulong.Parse(match.Groups[1].Value);
                     }
-                    else if (allLines[j].Contains("m_Script:"))
+                    else if (allLines[j].StartsWith("  m_Script:"))
                     {
                         var scriptMatch = Regex.Match(allLines[j], @"fileID: (-?\d+), guid: ([a-f0-9]{32})");
                         if (scriptMatch.Success)
@@ -190,14 +170,12 @@ public class MissingScriptResolver : EditorWindow
                     }
                 }
 
-                // Check if this component belongs to our target GameObject and its script is missing
-                if (gameObjectFileID == targetGoFileID && !string.IsNullOrEmpty(scriptGuid) &&
-                    IsScriptReferenceBroken(scriptGuid, scriptFileID))
+                if (!string.IsNullOrEmpty(scriptGuid) && IsScriptReferenceBroken(scriptGuid, scriptFileID))
                 {
                     var reference = new BrokenReference
                     {
-                        Owner = go,
-                        FilePath = filePath,
+                        Owner = goMap[gameObjectFileID],
+                        FilePath = currentFile,
                         ComponentFileID = componentFileID,
                         BrokenGuid = scriptGuid,
                         WasOdinSerialized = false
@@ -233,6 +211,12 @@ public class MissingScriptResolver : EditorWindow
                     reference.SerializedDataPreview = dataPreview.ToString();
                     brokenReferences.Add(reference);
                 }
+            }
+
+            if (brokenReferences.Count >= settings.searchLimit)
+            {
+                hitSearchLimit = true;
+                break;
             }
         }
     }
@@ -334,8 +318,7 @@ public class MissingScriptResolver : EditorWindow
 
         if (brokenReferences.Count == 0)
         {
-            EditorGUILayout.LabelField("No broken script references found on the selected object(s) or their children.");
-            EditorGUILayout.HelpBox("Select one or more GameObjects in the Hierarchy. The tool will scan them and all their children for 'Missing Script' components.", MessageType.Info);
+            EditorGUILayout.HelpBox("Select a GameObjects in the Hierarchy. The tool will scan the selected GameObject's asset file for 'Missing Script' components.", MessageType.Info);
         }
         else
         {
@@ -344,6 +327,11 @@ public class MissingScriptResolver : EditorWindow
             foreach (var reference in brokenReferences)
             {
                 DrawBrokenReferenceUI(reference);
+            }
+
+            if (hitSearchLimit)
+            {
+                EditorGUILayout.HelpBox($"Hit search limit of {settings.searchLimit}. The limit can be changed in settings.", MessageType.Warning);
             }
         }
 
@@ -459,7 +447,6 @@ public class MissingScriptResolver : EditorWindow
 
         EditorGUILayout.Space();
 
-        // Manual assignment field in the case if the suggestions are not satisfying
         reference.NewScript = (MonoScript)EditorGUILayout.ObjectField("Assign Correct Script", reference.NewScript, typeof(MonoScript), false);
 
         GUI.enabled = reference.NewScript != null;
@@ -551,55 +538,34 @@ public class MissingScriptResolver : EditorWindow
                                  .SelectMany(assembly => assembly.GetTypes())
                                  .FirstOrDefault(t => t.FullName == "Sirenix.OdinInspector.SerializedMonoBehaviour");
 
-        try
+        scriptFieldCache = new Dictionary<MonoScript, ScriptCacheInfo>();
+
+        // scripts from AssetDatabase (the .cs files)
+        string[] scriptGuids = AssetDatabase.FindAssets("t:MonoScript");
+        for (int i = 0; i < scriptGuids.Length; i++)
         {
-            scriptFieldCache = new Dictionary<MonoScript, ScriptCacheInfo>();
+            string guid = scriptGuids[i];
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+            var script = AssetDatabase.LoadAssetAtPath<MonoScript>(path);
 
-            // --- STAGE 1: Process scripts from AssetDatabase (your .cs files) ---
-            string[] scriptGuids = AssetDatabase.FindAssets("t:MonoScript");
-            EditorUtility.DisplayProgressBar("Building Script Cache", "Processing scripts in Assets...", 0f);
-
-            for (int i = 0; i < scriptGuids.Length; i++)
+            if (script != null)
             {
-                string guid = scriptGuids[i];
-                string path = AssetDatabase.GUIDToAssetPath(guid);
-                var script = AssetDatabase.LoadAssetAtPath<MonoScript>(path);
-
-                if (i % 20 == 0) // Progress bar
-                {
-                    EditorUtility.DisplayProgressBar("Building Script Cache", $"Processing: {Path.GetFileName(path)}", (float)i / scriptGuids.Length * 0.5f);
-                }
-
-                if (script != null)
-                {
-                    AddScriptToCache(script, odinType);
-                }
+                AddScriptToCache(script, odinType);
             }
-
-            // --- STAGE 2: Process scripts from all loaded assemblies (catches DLLs) ---
-            var allLoadedScripts = Resources.FindObjectsOfTypeAll<MonoScript>();
-            EditorUtility.DisplayProgressBar("Building Script Cache", "Processing scripts from loaded assemblies...", 0.5f);
-
-            for (int i = 0; i < allLoadedScripts.Length; i++)
-            {
-                var script = allLoadedScripts[i];
-
-                if (i % 50 == 0) // Progress bar
-                {
-                    EditorUtility.DisplayProgressBar("Building Script Cache", $"Processing: {script.name}", 0.5f + (float)i / allLoadedScripts.Length * 0.5f);
-                }
-
-                if (script != null && !scriptFieldCache.ContainsKey(script))
-                {
-                    AddScriptToCache(script, odinType);
-                }
-            }
-            isCacheBuilt = true;
         }
-        finally
+
+        // scripts from all loaded assemblies (catches DLLs)
+        var allLoadedScripts = Resources.FindObjectsOfTypeAll<MonoScript>();
+        for (int i = 0; i < allLoadedScripts.Length; i++)
         {
-            EditorUtility.ClearProgressBar();
+            var script = allLoadedScripts[i];
+
+            if (script != null && !scriptFieldCache.ContainsKey(script))
+            {
+                AddScriptToCache(script, odinType);
+            }
         }
+        isCacheBuilt = true;
     }
 
     private static List<string> GetAllSerializableFields(Type startingType)
@@ -633,6 +599,34 @@ public class MissingScriptResolver : EditorWindow
         inspectorModeInfo.SetValue(serializedObject, InspectorMode.Debug, null);
         SerializedProperty localIdProp = serializedObject.FindProperty("m_LocalIdentfierInFile");
         return (ulong)localIdProp.longValue;
+    }
+
+    private static GameObject[] GetAllGameObjectsInFileByOneGameObject(GameObject go)
+    {
+        if (go == null)
+            return null;
+
+        // Check if it's a prefab instance being edited in the Prefab Stage
+        var prefabStage = PrefabStageUtility.GetCurrentPrefabStage();
+        if (prefabStage != null && prefabStage.IsPartOfPrefabContents(go))
+        {
+            Transform prefabRoot = prefabStage.prefabContentsRoot.transform;
+            return prefabRoot.GetComponentsInChildren<Transform>(true)
+                             .Select(t => t.gameObject)
+                             .ToArray();
+        }
+
+        // Check if it's an object in a scene
+        if (go.scene.IsValid() && go.scene.isLoaded)
+        {
+            GameObject[] rootObjects = go.scene.GetRootGameObjects();
+            return rootObjects
+                .SelectMany(root => root.GetComponentsInChildren<Transform>(true))
+                .Select(t => t.gameObject)
+                .ToArray();
+        }
+
+        return null;
     }
 
     private static string GetFilePathForGameObject(GameObject go)

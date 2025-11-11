@@ -5,6 +5,7 @@ using UnityEngine;
 public class MissingScriptResolverSettings : ScriptableObject
 {
     public int searchLimit = 3;
+    public bool skipWarnings = false;
 
     private const string k_Path = "ProjectSettings/MissingScriptResolverSettings.asset";
 
@@ -53,6 +54,7 @@ static class MissingScriptResolverSettingsProvider
                 EditorGUI.BeginChangeCheck();
 
                 EditorGUILayout.PropertyField(m_SerializedSettings.FindProperty("searchLimit"));
+                EditorGUILayout.PropertyField(m_SerializedSettings.FindProperty("skipWarnings"));
 
                 if (EditorGUI.EndChangeCheck())
                 {

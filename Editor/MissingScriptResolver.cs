@@ -359,6 +359,9 @@ public class MissingScriptResolver : EditorWindow
         {
             FixReferenceInFile(_referenceToFix);
             _referenceToFix = null;
+
+            currentFile = null;
+            ScanCurrentFile();
         }
     }
 
@@ -470,7 +473,7 @@ public class MissingScriptResolver : EditorWindow
         GUI.enabled = reference.NewScript != null;
         if (GUILayout.Button("Fix This Reference"))
         {
-            if (EditorUtility.DisplayDialog("Confirm File Modification",
+            if (settings.skipWarnings || EditorUtility.DisplayDialog("Confirm File Modification",
                 $"This will modify the file '{Path.GetFileName(reference.FilePath)}' to fix the component on GameObject '{reference.Owner.name}'.\n\n" +
                 "Please ensure you have a backup or are using version control. Are you sure?", "Yes, Fix It", "Cancel"))
             {
@@ -541,6 +544,10 @@ public class MissingScriptResolver : EditorWindow
         {
             File.WriteAllLines(reference.FilePath, allLines);
             Debug.Log($"Successfully fixed {fixedAmount} script references in {Path.GetFileName(reference.FilePath)}.");
+
+            if (!settings.skipWarnings)
+                EditorUtility.DisplayDialog("Attention", "The next dialog will warn of an externally modified asset. Choose reload!", "OK");
+
             AssetDatabase.Refresh();
         }
         else

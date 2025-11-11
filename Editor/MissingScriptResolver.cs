@@ -81,11 +81,20 @@ public class MissingScriptResolver : EditorWindow
 
     private void OnDisable()
     {
-        Selection.selectionChanged -= OnSelectionChanged;
+        Selection.selectionChanged -= OnSelectionChanged; 
+        isVisible = false;
     }
 
+    bool isFocused;
+    bool isVisible;
+    void OnFocus() => isFocused = true;
+    void OnLostFocus() => isFocused = false;
+    void OnBecameVisible() => isVisible = true;
+    void OnBecameInvisible() => isVisible = false;
     private void OnSelectionChanged()
     {
+        if (!isVisible)
+            return;
         FindBrokenReferencesInSelectionAndChildren();
         if (brokenReferences.Count > 0)
         {
